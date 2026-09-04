@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SLINGOR.IO — гравитационные пращи</title>
+    <meta name="description" content="SLINGOR — единственная IO-игра, где физика орбит решает всё. Гравитация, пращевой разгон, ядра и космический хаос.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='46' fill='%23050714'/><circle cx='50' cy='50' r='16' fill='%23ffcc33'/><circle cx='50' cy='50' r='24' fill='none' stroke='%2300e5ff' stroke-width='3' stroke-dasharray='7 5'/></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Orbitron:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <canvas id="game" aria-label="SLINGOR arena"></canvas>
+
+    <!-- START SCREEN -->
+    <div id="menu" class="overlay visible">
+        <div class="panel menu-panel" id="menu-panel">
+            <div class="logo-wrap">
+                <div class="logo-planet"></div>
+                <h1 class="logo">SLINGOR<span>.IO</span></h1>
+            </div>
+            <p class="tagline">единственная IO-игра, где правила диктует гравитация</p>
+            <form id="join-form" class="join">
+                <input id="nick" maxlength="24" placeholder="позывной" autocomplete="off" value="">
+                <button type="submit" id="join-btn" class="btn-primary">ВОЙТИ В ОРБИТУ</button>
+                <div id="join-error" class="join-error"></div>
+            </form>
+            <div class="prefs">
+                <div class="prefs-row">
+                    <span class="prefs-label">КОРПУС</span>
+                    <div id="skin-picker" class="skin-picker"></div>
+                </div>
+                <div class="prefs-row">
+                    <span class="prefs-label">ЗВУК</span>
+                    <button type="button" id="sound-toggle" class="sound-toggle"></button>
+                </div>
+            </div>
+            <div class="howto">
+                <div class="howto-title">// как играть</div>
+                <div class="howto-row"><kbd>WASD</kbd><span>— тяга. Маршевые двигатели</span></div>
+                <div class="howto-row"><kbd>МЫШЬ</kbd><span>— на телефоне: сенсорный джойстик</span></div>
+                <div class="howto-row"><kbd>ГРАВИТАЦИЯ</kbd><span>— тебя тянет к звёздам. Используй её!</span></div>
+                <div class="howto-row"><kbd>ПРАЩА</kbd><span>— обогни планету на скорости → разгон ×1.35 и очки</span></div>
+                <div class="howto-row"><kbd>ЦЕПЬ ПРАЩ</kbd><span>— ещё одна праща за 6 сек → очки ×2, ×3 … до ×5</span></div>
+                <div class="howto-row"><kbd>ЯДРА</kbd><span>— собирай. Гибель → контейнер с грузом падает к другим (26 сек — и исчезает)</span></div>
+                <div class="howto-row"><kbd>БОНУСЫ</kbd><span>— щит отражает удар, буст удваивает тягу, магнит тянет ядра</span></div>
+                <div class="howto-row"><kbd>⚠</kbd><span>— столкновение с планетой = смерть. Обходи!</span></div>
+            </div>
+            <div class="leaderboard" id="menu-leaderboard">
+                <div class="leaderboard-title">// лучшие зонды</div>
+                <div id="menu-lb"></div>
+            </div>
+            <div class="menu-footer">SLINGOR <span id="menu-ver"></span> · 4ayka studio</div>
+        </div>
+    </div>
+
+    <!-- HUD -->
+    <div id="hud" class="hidden">
+        <div class="hud-top">
+            <div class="board">
+                <div class="board-title">LIVE | <span id="online">0</span></div>
+                <div id="board-list"></div>
+            </div>
+            <div class="hud-center">
+                <div id="score" class="score">0</div>
+                <div class="score-label">ЯДРА НА БОРТУ</div>
+                <div class="buffs">
+                    <span id="buff-shield" class="buff" data-b="0">ЩИТ</span>
+                    <span id="buff-boost" class="buff" data-b="1">БУСТ</span>
+                    <span id="buff-magnet" class="buff" data-b="2">МАГНИТ</span>
+                </div>
+            </div>
+            <div class="hud-right">
+                <div class="speedo">
+                    <div class="speedo-label">СКОРОСТЬ</div>
+                    <div class="speedo-bar"><div id="speed-fill"></div></div>
+                    <div id="speed-val" class="speedo-val">0</div>
+                </div>
+                <div class="net"><span id="ping">—</span> MS</div>
+            </div>
+        </div>
+        <canvas id="minimap" width="190" height="190" aria-label="карта"></canvas>
+        <div id="events" class="events"></div>
+        <div id="sling-fx" class="sling-fx hidden">ПРАЩА ×1.35</div>
+        <div id="combo-fx" class="combo-fx hidden"></div>
+        <div id="respawn" class="respawn hidden">
+            <div class="respawn-inner"><span id="respawn-num">2</span></div>
+            <div class="respawn-label">РЕСПАВН</div>
+        </div>
+        <div id="results" class="results hidden">
+            <div class="res-title">СЕССИЯ ЗАВЕРШЕНА</div>
+            <div class="res-grid">
+                <div class="res-row"><span>ЯДРА СОБРАНО</span><b id="res-cores">0</b></div>
+                <div class="res-row"><span>ГРУЗА ИЗ КОНТЕЙНЕРОВ</span><b id="res-wreck">0</b></div>
+                <div class="res-row"><span>ЛУЧШАЯ ЦЕПЬ ПРАЩ</span><b id="res-combo">0</b></div>
+                <div class="res-row"><span>ДИСТАНЦИЯ</span><b id="res-dist">0 м</b></div>
+            </div>
+            <div class="res-leader">ЛИДЕР АРЕНЫ: <span id="res-top">—</span></div>
+        </div>
+        <div id="toast" class="toast hidden"></div>
+        <div class="hud-bottom">SLINGOR <span id="hud-ver"></span> | <span id="fps">60</span> FPS</div>
+    </div>
+
+    <script src="/static/game.js"></script>
+    <script>
+    if (location.protocol === 'file:') {
+        document.getElementById('menu-panel').innerHTML =
+            '<div class="file-note">' +
+            '<div class="file-note-title">// игра запускается только через сервер</div>' +
+            '<p>Файл открыт прямо с диска — без сервера игра не работает.</p>' +
+            '<p class="cmd">cd slingor<br>python main.py</p>' +
+            '<p>затем открой <a href="http://127.0.0.1:8033">http://127.0.0.1:8033</a></p>' +
+            '</div>';
+    }
+    </script>
+</body>
+</html>
