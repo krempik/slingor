@@ -14,8 +14,8 @@ echo     (открывается в любом браузере: Chrome, Firefox
 echo   ============================================================
 echo.
 
-rem -------------------------------------------------- server is running?
-netstat -ano | findstr /C:":8033 " | findstr /C:"LISTENING" >nul
+rem ----------------------------------------- server already running?
+curl.exe -s -f -o nul --max-time 2 http://127.0.0.1:8033/api/version
 if not errorlevel 1 goto server_ok
 
 echo   Сервер не запущен — поднимаю...
@@ -23,7 +23,7 @@ start "SLINGOR-SERVER" "%PY%" main.py
 
 set /a tries=0
 :wait_port
-netstat -ano | findstr /C:":8033 " | findstr /C:"LISTENING" >nul
+curl.exe -s -f -o nul --max-time 2 http://127.0.0.1:8033/api/version
 if not errorlevel 1 goto server_ok
 set /a tries+=1
 if %tries% GEQ 30 (
@@ -33,7 +33,7 @@ if %tries% GEQ 30 (
   pause
   goto :open_browser
 )
-timeout /t 1 /nobreak >nul
+ping -n 2 127.0.0.1 >nul
 goto wait_port
 
 :server_ok

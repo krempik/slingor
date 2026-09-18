@@ -15,11 +15,14 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import math
 import os
+import random
 import time
+import weakref
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -36,6 +39,7 @@ from game.database import Database
 from game.physics import World
 
 log = logging.getLogger("slingor")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -69,15 +73,20 @@ class Room:
     def __init__(self, key: str, db: Database):
         self.key = key
         self.db = db
-        self.world = World()
-        self.brain = BotBrain(self.world)
+        # One RNG per room, explicitly seeded, so no global/shared RNG state
+        # leaks between concurrent rooms (see AGENTS.md rule #6).
+        self._rng = random.Random(int.from_bytes(os.urandom(8), "big"))
+        self.world = World(self._rng)
+        self.brain = BotBrain(self.world, self._rng)
         self.humans: dict[str, WebSocket] = {}
         self.bot_ids: list[str] = []
         self.dead = False
         self.task: asyncio.Task | None = None
         self._tick = 0
         self._seq = 0
-        self._warned: set[int] = set()  # sockets already logged as broken
+        self._pending_sends: set[asyncio.Task] = set()
+        # sockets already logged as broken (WeakSet → no unbounded growth)
+        self._warned: weakref.WeakSet[WebSocket] = weakref.WeakSet()
         self._last_input: dict[str, float] = {}  # pid -> monotonic ts
         self._msg_ts: dict[str, deque] = {}  # pid -> deque of msg timestamps
         self._empty_since: float | None = None  # monotonic ts of first empty state
@@ -135,7 +144,9 @@ class Room:
                 for b in self.world.bonuses if not b.taken]
 
     def send_sync(self, ws: WebSocket, msg: dict) -> None:
-        asyncio.create_task(self._send(ws, msg))
+        task = asyncio.create_task(self._send(ws, msg))
+        self._pending_sends.add(task)
+        task.add_done_callback(self._pending_sends.discard)
 
     async def _send(self, ws: WebSocket, msg: dict) -> None:
         try:
@@ -144,10 +155,9 @@ class Room:
             # single point where a dead socket surfaces: log once, then force
             # the pending receive to abort so the ws_endpoint finally runs
             # remove_human exactly once.
-            key = id(ws)
-            if key not in self._warned:
-                self._warned.add(key)
-                log.warning("send to ws %s failed (%s); closing", key, exc)
+            if ws not in self._warned:
+                self._warned.add(ws)
+                log.warning("send to ws %s failed (%s); closing", id(ws), exc)
             await self._close_ws(ws)
 
     async def _close_ws(self, ws: WebSocket) -> None:
@@ -200,6 +210,14 @@ class Room:
         }
 
     # ---------------------------------------------------------------- loop
+    def kill(self) -> None:
+        """Stop this room exactly once. The single source of truth for dead."""
+        if self.dead:
+            return
+        self.dead = True
+        if self.task and not self.task.done():
+            self.task.cancel()
+
     async def run(self) -> None:
         try:
             while not self.dead:
@@ -214,7 +232,7 @@ class Room:
                 elapsed = time.monotonic() - t0
                 await asyncio.sleep(max(0.0, DT - elapsed))
         except asyncio.CancelledError:
-            pass
+            log.debug("room %s loop cancelled", self.key)
         finally:
             self.dead = True
 
@@ -234,8 +252,6 @@ def _run_room_task(room: Room) -> asyncio.Task:
     async def runner() -> None:
         try:
             await room.run()
-        except asyncio.CancelledError:
-            room.dead = True
         except Exception:
             room.dead = True
             log.exception("room %s crashed", room.key)
@@ -243,12 +259,17 @@ def _run_room_task(room: Room) -> asyncio.Task:
     return asyncio.create_task(runner())
 
 
+async def _stop_room(room: Room) -> None:
+    if room.task and not room.task.done():
+        room.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await room.task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     yield
-    for room in rooms.values():
-        if room.task and not room.task.done():
-            room.task.cancel()
+    await asyncio.gather(*(_stop_room(r) for r in rooms.values()), return_exceptions=True)
 
 
 app = FastAPI(title="SLINGOR", version=__version__, docs_url=None, redoc_url=None, lifespan=lifespan)
@@ -274,9 +295,7 @@ def reap_rooms() -> None:
         if room._empty_since is None:
             room._empty_since = now
         elif now - room._empty_since >= ROOM_IDLE_GRACE:
-            room.dead = True
-            if room.task and not room.task.done():
-                room.task.cancel()
+            room.kill()
             rooms.pop(key, None)
             log.info("room %s reaped after idle grace", key)
 
@@ -336,7 +355,7 @@ async def ws_endpoint(websocket: WebSocket, name: str = "", room: str = "r1", sk
     key = f"r{room.strip()}" if room and room.strip() else "r1"
     r = get_room(key)
     if len(r.humans) >= MAX_HUMANS:
-        await websocket.send_text(json.dumps({"t": "full"}))
+        await r._send(websocket, {"t": "full"})
         await websocket.close()
         return
     pid = r.add_human(websocket, name.strip()[:24], skin=skin.strip()[:16])
@@ -354,7 +373,7 @@ async def ws_endpoint(websocket: WebSocket, name: str = "", room: str = "r1", sk
             while ts[0] < now - MSG_RATE_WINDOW:
                 ts.popleft()
             if len(ts) > MAX_MSG_RATE * MSG_RATE_WINDOW:
-                await websocket.send_text(json.dumps({"t": "kick", "reason": "msg_rate"}))
+                await r._send(websocket, {"t": "kick", "reason": "msg_rate"})
                 await websocket.close(code=1008)
                 return
             if len(raw) > MAX_MSG_BYTES:
@@ -391,7 +410,7 @@ async def ws_endpoint(websocket: WebSocket, name: str = "", room: str = "r1", sk
                     player.input = {k: bool(keys.get(k, False))
                                     for k in ("up", "down", "left", "right")}
             elif mtype == "ping":
-                await websocket.send_text(json.dumps({"t": "pong", "a": time.time()}))
+                await r._send(websocket, {"t": "pong", "a": time.time()})
     except WebSocketDisconnect:
         pass
     except asyncio.TimeoutError:

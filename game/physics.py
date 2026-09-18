@@ -21,7 +21,6 @@ from .const import (
     BONUS_SCORE,
     BOOST_DURATION,
     BOOST_THRUST_MULT,
-    CORE_RADIUS,
     CORE_RESPAWN,
     DRAG,
     DT,
