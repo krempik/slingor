@@ -31,7 +31,10 @@ class Database:
             conn.executescript(_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.path), timeout=10)
+        conn = sqlite3.connect(str(self.path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
 
     def submit(self, name: str, score: int) -> None:
         if score < 1:
